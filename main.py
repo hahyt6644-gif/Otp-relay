@@ -8,7 +8,7 @@ import os
 import re
 
 # --- FLASK WEB SERVER (For Render Keep-Alive) ---
-app = Flask(name)
+app = Flask(__name__)
 
 @app.route('/')
 def home():
