@@ -15,21 +15,19 @@ def home():
     return "🟢 OTP Linker Bot is Running!"
 
 def run_server():
-    port = int(os.environ.get("PORT", 8080))
-    # Disable debug and use threaded=True to prevent loop conflicts
-    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
+    port = int(os.environ.get("PORT", 10000)) # Render uses 10000 by default
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # --- BOT CONFIGURATION ---
 API_ID = 25240346
 API_HASH = 'b8849fd945ed9225a002fda96591b6ee'
 BOT_TOKEN = '7610030035:AAEJf2HX7lSg9H9QyS1Y1a8o_586qhvGmkg'
 
-# ⚠️ PASTE YOUR ACTIVE STRING SESSION HERE
+# ⚠️ ENSURE THIS IS A VALID, NEW STRING SESSION
 STRING_SESSION = '1BVtsOLQBu1sWLUjy9O3WhRUoNkCwOcalVvxCOMrjYfFrUezu0qaZrlBK1CUHZE0cm4dnq4V58LhDxyat4qcpkQmCgyD65gCKoxGGc-ZVpMgPLLfg1BD235emPa_y3g3eyoBmCDXd9q01rKcQaacp174qxlomjy_rXM4xBiblwCWNhoztyIGBFERNDnkiKz3EztZAHd64nb4kK4NSN49BDl1hgxMfqaeIs2lIkRCUMHLyrYzrAZ4DY6biOsNakeaoHGrQJEecnn9V4xQEtm9zvfddkuVn6IiLMTDGjA4mBYbdjB6AaU-FubFhKRqjVhwU0mk5Aih2cqPrQ8nUHwMvrYp6HekIo8s='
 
 ADMIN_ID = 6357920694
 
-# Dynamic Settings
 config = {
     "TARGET_BOT": "UxOtpBOT",  
     "SOURCE_GROUP": None,      
@@ -41,175 +39,111 @@ bot = TelegramClient('bot_session', API_ID, API_HASH)
 
 pending_numbers = {}
 
-print("--- Starting OTP Linker with Admin Controls ---")
-
 # --- ADMIN COMMANDS ---
 
 @bot.on(events.NewMessage(pattern='/adhelp', from_users=ADMIN_ID))
 async def admin_help(event):
     help_text = (
         "🛠️ **Admin Control Panel**\n\n"
-        f"**Current Target Bot:** `{config['TARGET_BOT']}`\n"
-        f"**Current Source Group:** `{config['SOURCE_GROUP'] or 'Any (Global Listener)'}`\n"
-        f"**Current Dest Group:** `{config['DEST_GROUP'] or 'Not Set'}`\n\n"
+        f"**Target Bot:** `{config['TARGET_BOT']}`\n"
+        f"**Source Group:** `{config['SOURCE_GROUP'] or 'Global'}`\n"
+        f"**Dest Group:** `{config['DEST_GROUP'] or 'None'}`\n\n"
         "**Commands:**\n"
-        "`/setbot username` - Change the bot we request numbers from (e.g., /setbot @UxOtpBOT)\n"
-        "`/setsrc chat_id` - Set the specific group to listen for OTPs\n"
-        "`/setdest chat_id` - Set the group where ALL OTPs will be forwarded\n"
-        "`/status` - View active pending numbers"
+        "`/setbot username` | `/setsrc id` | `/setdest id` | `/status`"
     )
     await event.reply(help_text)
 
 @bot.on(events.NewMessage(pattern=r'/setbot (.*)', from_users=ADMIN_ID))
 async def set_target_bot(event):
-    new_bot = event.pattern_match.group(1).strip()
-    config["TARGET_BOT"] = new_bot.replace("@", "")
-    await event.reply(f"✅ Target Provider Bot updated to: `{config['TARGET_BOT']}`")
+    config["TARGET_BOT"] = event.pattern_match.group(1).strip().replace("@", "")
+    await event.reply(f"✅ Target Bot: `{config['TARGET_BOT']}`")
 
 @bot.on(events.NewMessage(pattern=r'/setsrc (.*)', from_users=ADMIN_ID))
 async def set_source_group(event):
-    new_src = event.pattern_match.group(1).strip()
-    config["SOURCE_GROUP"] = new_src
-    await event.reply(f"✅ Source OTP Group updated to: `{config['SOURCE_GROUP']}`")
+    config["SOURCE_GROUP"] = event.pattern_match.group(1).strip()
+    await event.reply(f"✅ Source ID: `{config['SOURCE_GROUP']}`")
 
 @bot.on(events.NewMessage(pattern=r'/setdest (.*)', from_users=ADMIN_ID))
 async def set_dest_group(event):
-    new_dest = event.pattern_match.group(1).strip()
-    config["DEST_GROUP"] = new_dest
-    await event.reply(f"✅ Destination Group updated to: `{config['DEST_GROUP']}`")
+    config["DEST_GROUP"] = event.pattern_match.group(1).strip()
+    await event.reply(f"✅ Dest ID: `{config['DEST_GROUP']}`")
 
-@bot.on(events.NewMessage(pattern='/status', from_users=ADMIN_ID))
-async def show_status(event):
-    if not pending_numbers:
-        await event.reply("📊 Currently waiting on: **0 numbers**")
-    else:
-        text = "📊 **Pending OTP Requests:**\n"
-        for num, chat_id in pending_numbers.items():
-            text += f"- `{num}` (Requested by ID: {chat_id})\n"
-        await event.reply(text)
-
-# --- BOT LOGIC (USER FACING) ---
+# --- BOT LOGIC ---
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    if event.sender_id == ADMIN_ID:
-        await event.reply("👋 Welcome Admin! Use /adhelp to configure the bot.", buttons=[Button.inline("🚀 Request Service", b"get_ven")])
-    else:
-        await event.reply("👋 Welcome to the OTP Linker!\n\nClick below to fetch the service.", buttons=[Button.inline("🚀 Request Service", b"get_ven")])
+    await event.reply("👋 Click to request service.", buttons=[Button.inline("🚀 Request Service", b"get_ven")])
 
 @bot.on(events.CallbackQuery(data=b"get_ven"))
 async def callback_handler(event):
-    try:
-        await event.edit(f"⏳ Connecting to `{config['TARGET_BOT']}`... Please wait.")
-    except MessageNotModifiedError:
-        pass
+    try: await event.edit("⏳ Connecting...")
+    except MessageNotModifiedError: pass
     
     try:
         await user_client.send_message(config['TARGET_BOT'], '/start')
-        await asyncio.sleep(2.5) 
-        
+        await asyncio.sleep(3) 
         messages = await user_client.get_messages(config['TARGET_BOT'], limit=1)
         
         if messages and messages[0].reply_markup:
             msg = messages[0]
             clicked = False
-            
             for r_idx, row in enumerate(msg.reply_markup.rows):
                 for c_idx, button in enumerate(row.buttons):
                     if hasattr(button, 'text') and "Venezuela" in button.text:
                         await msg.click(r_idx, c_idx)
                         clicked = True
                         break
-                if clicked: 
-                    break 
+                if clicked: break 
             
             if clicked:
-                try:
-                    await event.edit("✅ **Service Selected!**\nWaiting for OTP generation...")
-                except MessageNotModifiedError:
-                    pass
-                
-                await asyncio.sleep(3.5)
+                await asyncio.sleep(4)
                 reply_msgs = await user_client.get_messages(config['TARGET_BOT'], limit=1)
-                
                 if reply_msgs:
-                    provider_text = reply_msgs[0].text
-                    
-                    number_match = re.search(r'(\d{8,15})', provider_text)
-                    
-                    if number_match:
-                        full_number = number_match.group(1)
-                        pending_numbers[full_number] = event.chat_id
-                        
-                        try:
-                            await event.edit(
-                                f"📩 **Response:**\n\n{provider_text}",
-                                buttons=[Button.inline("🔄 Get New Number", b"get_ven")]
-                            )
-                        except MessageNotModifiedError:
-                            pass
+                    num_match = re.search(r'(\d{8,15})', reply_msgs[0].text)
+                    if num_match:
+                        full_num = num_match.group(1)
+                        pending_numbers[full_num] = event.chat_id
+                        await event.edit(f"📩 **Number:** `{full_num}`", buttons=[Button.inline("🔄 New Number", b"get_ven")])
                     else:
-                        try:
-                            await event.edit(
-                                f"📩 **Response:**\n\n{provider_text}\n\n❌ Could not extract number.",
-                                buttons=[Button.inline("🔄 Try Again", b"get_ven")]
-                            )
-                        except MessageNotModifiedError:
-                            pass
-            else:
-                try:
-                    await event.edit("❌ Could not find the option in the menu.", buttons=[Button.inline("🔄 Try Again", b"get_ven")])
-                except MessageNotModifiedError:
-                    pass
+                        await event.edit("❌ Number extraction failed.", buttons=[Button.inline("🔄 Try Again", b"get_ven")])
     except Exception as e:
-        print(f"Callback Error: {e}")
+        print(f"Error: {e}")
 
-# --- GROUP LISTENER & FORWARDER ---
+# --- LISTENER ---
 
 @user_client.on(events.NewMessage)
-async def otp_group_listener(event):
+async def otp_listener(event):
     text = event.message.text or ""
-    
-    if config["SOURCE_GROUP"]:
-        chat = await event.get_chat()
-        if str(chat.id) != config["SOURCE_GROUP"] and getattr(chat, 'username', '') != config["SOURCE_GROUP"].replace("@", ""):
-            return
-
     if "OTP Received" in text and "Number:" in text:
         if config["DEST_GROUP"]:
-            try:
-                await bot.send_message(config["DEST_GROUP"], f"📢 **New OTP Broadcast:**\n\n{text}")
-            except Exception as e:
-                print(f"Failed to forward to Dest Group: {e}")
+            try: await bot.send_message(config["DEST_GROUP"], text)
+            except: pass
 
-        masked_match = re.search(r'Number:\s*([\d\*]+)', text)
+        masked_match = re.search(r'Number:.*?([\d\*]+)', text)
         if masked_match:
             masked_number = masked_match.group(1)
             parts = re.split(r'\*+', masked_number)
-            
             if len(parts) == 2:
-                first_4 = parts[0][:4]
-                last_4 = parts[1][-4:]
-                
-                for pending_num, chat_id in list(pending_numbers.items()):
-                    if pending_num.startswith(first_4) and pending_num.endswith(last_4):
-                        await bot.send_message(chat_id, f"🎉 **YOUR OTP ARRIVED!**\n\n{text}")
-                        del pending_numbers[pending_num]
+                f4, l4 = parts[0][:4], parts[1][-4:]
+                for p_num, c_id in list(pending_numbers.items()):
+                    if p_num.startswith(f4) and p_num.endswith(l4):
+                        await bot.send_message(c_id, f"🎉 **OTP!**\n\n{text}")
+                        del pending_numbers[p_num]
                         break
 
-# --- ASYNC EXECUTION BLOCK ---
-async def main():
-    print("Initializing Telegram Clients...")
-    # Explicitly await the start of both clients
+# --- ASYNC MAIN ---
+async def start_clients():
+    print("--- Starting Clients ---")
     await user_client.start()
     await bot.start(bot_token=BOT_TOKEN)
-    print("✅ Web Server and Telegram Clients are Online!")
-    # Keep the bot running
+    print("✅ All systems online.")
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
-    # Start Flask in a background thread
+    # Start Web Server
     threading.Thread(target=run_server, daemon=True).start()
     
-    # Safely run the asyncio event loop
-    bot.loop.run_until_complete(main())
+    # Start Telegram Clients
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(start_clients())
