@@ -22,8 +22,8 @@ ADMIN_ID = 6357920694
 
 config = {
     "TARGET_BOT": "UxOtpBOT",
-    "SOURCE_ID": None,       
-    "DEST_ID": None,         
+    "SOURCE_ID": 3633481131,       
+    "DEST_ID": 5274614337,         
     "SOURCE_LINK": "https://t.me/+ZxBeMVFToXEzNDFh",     
     "DEST_LINK": "https://t.me/+6gHllUFSnBBmYzc1",       
     "CHANNEL_LINK": "https://t.me/YourChannel"
