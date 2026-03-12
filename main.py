@@ -2,12 +2,12 @@ from telethon import TelegramClient, events, Button, functions
 from telethon.sessions import StringSession
 from telethon.errors import MessageNotModifiedError, InviteHashExpiredError, UserAlreadyParticipantError
 from flask import Flask
-import threading, asyncio, os, re, requests
+import threading, asyncio, os, re, requests, traceback
 
 # --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "🟢 OTP RELAY AI-PRO IS ONLINE"
+def home(): return "🟢 OTP SELF-HEALING SYSTEM ONLINE"
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -24,89 +24,56 @@ config = {
     "TARGET_BOT": "UxOtpBOT",
     "SOURCE_ID": None,       
     "DEST_ID": None,         
-    "SOURCE_LINK": None,     
-    "DEST_LINK": None,       
+    "SOURCE_LINK": "https://t.me/+ZxBeMVFToXEzNDFh",     
+    "DEST_LINK": "https://t.me/+6gHllUFSnBBmYzc1",       
     "CHANNEL_LINK": "https://t.me/YourChannel"
 }
 
 user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 bot = TelegramClient('bot_session', API_ID, API_HASH)
-
 pending_numbers = {}
 
-# --- AI API INTEGRATION ---
-def get_ai_response(prompt):
+# --- AI ERROR FIXER ---
+async def notify_admin_of_error(error_trace):
     try:
-        url = f"https://apis.prexzyvilla.site/ai/ai4chat?prompt={prompt}"
-        res = requests.get(url).json()
-        if res.get("status"):
-            return res["data"]["response"]
+        # Get AI's take on the error
+        ai_url = f"https://apis.prexzyvilla.site/ai/ai4chat?prompt=Fix this Python Telethon error: {error_trace[:500]}"
+        ai_res = requests.get(ai_url).json()
+        ai_advice = ai_res["data"]["response"] if ai_res.get("status") else "AI failed to analyze."
+        
+        error_msg = (
+            "⚠️ **CRITICAL BOT ERROR**\n\n"
+            f"**Raw Error:**\n`{error_trace[:1000]}`\n\n"
+            f"🤖 **AI Suggestion:**\n{ai_advice}"
+        )
+        await bot.send_message(ADMIN_ID, error_msg)
     except Exception as e:
-        return f"AI Error: {e}"
-    return "Sorry, I couldn't process that request."
+        print(f"Error in error handler: {e}")
 
-# --- HELPER: AUTO-JOIN LOGIC ---
-async def ensure_joined(invite_link):
-    if not invite_link or "t.me/+" not in invite_link:
-        return False
-    try:
-        hash_part = invite_link.split('+')[-1]
-        await user_client(functions.messages.ImportChatInviteRequest(hash=hash_part))
-        return True
-    except UserAlreadyParticipantError:
-        return True
-    except Exception as e:
-        print(f"Join Error: {e}")
-        return False
+# --- AUTO-JOIN HANDLER ---
+async def ensure_groups_joined():
+    for link in [config["SOURCE_LINK"], config["DEST_LINK"]]:
+        if link and "t.me/+" in link:
+            try:
+                hash_part = link.split('+')[-1]
+                await user_client(functions.messages.ImportChatInviteRequest(hash=hash_part))
+            except (UserAlreadyParticipantError, InviteHashExpiredError):
+                continue
+            except Exception as e:
+                await notify_admin_of_error(f"Join Failure: {e}")
 
-# --- ADMIN COMMANDS ---
-
-@bot.on(events.NewMessage(pattern='/adhelp', from_users=ADMIN_ID))
-async def admin_help(event):
-    await event.reply(
-        "🛠️ **Admin AI-Pro Panel**\n\n"
-        "**Commands:**\n"
-        "`/setsrc ID LINK` - Set Source Group\n"
-        "`/setdest ID LINK` - Set Dest Group\n"
-        "`/setchan LINK` - Set Channel link\n"
-        "`/ask prompt` - Get a response from the integrated AI"
-    )
-
-@bot.on(events.NewMessage(pattern=r'/setsrc (.*) (.*)', from_users=ADMIN_ID))
-async def set_src(event):
-    config["SOURCE_ID"], config["SOURCE_LINK"] = event.pattern_match.group(1), event.pattern_match.group(2)
-    joined = await ensure_joined(config["SOURCE_LINK"])
-    status = "✅ Joined" if joined else "❌ Failed to Join"
-    await event.reply(f"Source Configured. Status: {status}")
-
-@bot.on(events.NewMessage(pattern=r'/setdest (.*) (.*)', from_users=ADMIN_ID))
-async def set_dest(event):
-    config["DEST_ID"], config["DEST_LINK"] = event.pattern_match.group(1), event.pattern_match.group(2)
-    joined = await ensure_joined(config["DEST_LINK"])
-    status = "✅ Joined" if joined else "❌ Failed to Join"
-    await event.reply(f"Dest Configured. Status: {status}")
-
-@bot.on(events.NewMessage(pattern=r'/ask (.*)', from_users=ADMIN_ID))
-async def ai_ask(event):
-    prompt = event.pattern_match.group(1)
-    response = get_ai_response(prompt)
-    await event.reply(f"🤖 **AI Response:**\n\n{response}")
-
-# --- BOT LOGIC (NUMBER REQUEST) ---
+# --- BOT LOGIC ---
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    # Auto-attempt join if links exist but IDs are missing
-    if config["SOURCE_LINK"]: await ensure_joined(config["SOURCE_LINK"])
-    if config["DEST_LINK"]: await ensure_joined(config["DEST_LINK"])
-    
-    await event.reply("🇻🇪 **Venezuela Service Selection**", 
+    await ensure_groups_joined()
+    await event.reply("🇻🇪 **Venezuela Service**\nStatus: Connected", 
                      buttons=[Button.inline("🚀 Request Numbers", b"get_ven")])
 
 @bot.on(events.CallbackQuery(data=b"get_ven"))
 async def callback_handler(event):
     try:
-        await event.edit("⏳ Contacting Provider...")
+        await event.edit("⏳ Fetching list...")
         await user_client.send_message(config['TARGET_BOT'], '/start')
         await asyncio.sleep(3)
         
@@ -124,55 +91,59 @@ async def callback_handler(event):
                         if found_nums:
                             for n in found_nums: pending_numbers[n] = event.chat_id
                             num_list_str = "\n".join([f"• `{n}`" for n in found_nums])
-                            await event.edit(f"✅ **Numbers Active:**\n{num_list_str}\n\n⏳ Waiting for OTPs...", 
-                                           buttons=[Button.inline("🔄 Refresh List", b"get_ven")])
-                        else:
-                            await event.edit("❌ Provider list empty. Try again in a minute.")
+                            
+                            # Buttons including the OTP Group link
+                            btns = [
+                                [Button.inline("🔄 Refresh List", b"get_ven")],
+                                [Button.url("💬 View OTP Group", config["SOURCE_LINK"])]
+                            ]
+                            await event.edit(f"✅ **Numbers Active:**\n{num_list_str}", buttons=btns)
                         return
-    except Exception as e:
-        print(f"Error: {e}")
-        await event.edit("⚠️ Connection Error. Ensure user account is active.")
+    except Exception:
+        await notify_admin_of_error(traceback.format_exc())
+        await event.edit("❌ System Error. Admin has been notified.")
 
-# --- OTP FORWARDER (Visual Screenshot Format) ---
+# --- OTP LISTENER ---
 
 @user_client.on(events.NewMessage)
 async def otp_forwarder(event):
-    text = event.message.text or ""
-    if config["SOURCE_ID"] and str(event.chat_id) != str(config["SOURCE_ID"]): return
-
-    if "New" in text or "OTP" in text:
-        otp_match = re.search(r'(\d{4,8})', text) # Matches 4-8 digit OTPs
-        masked_match = re.search(r'Number:.*?([\d\*]+)', text)
-        
-        if otp_match and masked_match:
-            otp_code = otp_match.group(1)
-            m_num = masked_match.group(1)
-            f4 = m_num.split('*')[0][:4]
-            l4 = m_num.split('*')[-1][-4:]
+    try:
+        text = event.message.text or ""
+        # The script is smart: it listens to the source and forwards to dest
+        if "New" in text or "OTP" in text:
+            otp_match = re.search(r'(\d{4,8})', text)
+            masked_match = re.search(r'Number:.*?([\d\*]+)', text)
             
-            bot_user = (await bot.get_me()).username
-            buttons = [
-                [Button.inline(f"{otp_code}", b"none")],
-                [Button.url("🚀 Panel", f"https://t.me/{bot_user}")],
-                [Button.url("📱 Channel", config["CHANNEL_LINK"])]
-            ]
+            if otp_match and masked_match:
+                otp_code = otp_match.group(1)
+                m_num = masked_match.group(1)
+                f4, l4 = m_num.split('*')[0][:4], m_num.split('*')[-1][-4:]
+                
+                bot_me = await bot.get_me()
+                buttons = [
+                    [Button.inline(f"{otp_code}", b"none")],
+                    [Button.url("🚀 Panel", f"https://t.me/{bot_me.username}")],
+                    [Button.url("📱 Channel", config["CHANNEL_LINK"])]
+                ]
 
-            # Forwarding Logic
-            for p_num, c_id in list(pending_numbers.items()):
-                if p_num.startswith(f4) and p_num.endswith(l4):
-                    # To the User
-                    await bot.send_message(c_id, f"🇻🇪 VE | {f4}••{l4} | FB", buttons=buttons)
-                    # To the Admin's Dest Group
-                    if config["DEST_ID"]:
-                        await bot.send_message(config["DEST_ID"], f"🇻🇪 VE | {f4}••{l4} | FB", buttons=buttons)
-                    del pending_numbers[p_num]
-                    break
+                for p_num, c_id in list(pending_numbers.items()):
+                    if p_num.startswith(f4) and p_num.endswith(l4):
+                        # Send to User
+                        await bot.send_message(c_id, f"🇻🇪 VE | {f4}••{l4} | FB", buttons=buttons)
+                        # Post to Dest Group
+                        if config["DEST_LINK"]:
+                            await bot.send_message(config["DEST_ID"] or ADMIN_ID, f"🇻🇪 VE | {f4}••{l4} | FB", buttons=buttons)
+                        del pending_numbers[p_num]
+                        break
+    except Exception:
+        await notify_admin_of_error(traceback.format_exc())
 
 # --- STARTUP ---
 async def start_main():
     await user_client.start()
     await bot.start(bot_token=BOT_TOKEN)
-    print("✅ System Online.")
+    await ensure_groups_joined()
+    print("✅ All systems go.")
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
