@@ -1,157 +1,211 @@
-from telethon import TelegramClient, events, Button
-from telethon.sessions import StringSession
-from telethon.errors import MessageNotModifiedError
+import telebot
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
+import requests
+import threading
+import time
 from flask import Flask
-import threading, asyncio, os, re, traceback, json
-
-# --- FLASK KEEP-ALIVE ---
-app = Flask(__name__)
-@app.route('/')
-def home(): return "🟢 OTP RELAY FIXED ID VERSION"
-
-def run_server():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
 
 # --- CONFIGURATION ---
-API_ID = 25240346
-API_HASH = 'b8849fd945ed9225a002fda96591b6ee'
-BOT_TOKEN = '7610030035:AAEJf2HX7lSg9H9QyS1Y1a8o_586qhvGmkg'
-STRING_SESSION = '1BVtsOLQBu1sWLUjy9O3WhRUoNkCwOcalVvxCOMrjYfFrUezu0qaZrlBK1CUHZE0cm4dnq4V58LhDxyat4qcpkQmCgyD65gCKoxGGc-ZVpMgPLLfg1BD235emPa_y3g3eyoBmCDXd9q01rKcQaacp174qxlomjy_rXM4xBiblwCWNhoztyIGBFERNDnkiKz3EztZAHd64nb4kK4NSN49BDl1hgxMfqaeIs2lIkRCUMHLyrYzrAZ4DY6biOsNakeaoHGrQJEecnn9V4xQEtm9zvfddkuVn6IiLMTDGjA4mBYbdjB6AaU-FubFhKRqjVhwU0mk5Aih2cqPrQ8nUHwMvrYp6HekIo8s='
-
+TOKEN = "7610030035:AAEJf2HX7lSg9H9QyS1Y1a8o_586qhvGmkg"
 ADMIN_ID = 6357920694
-TARGET_BOT = "UxOtpBOT"
+GROUP_ID = "-1003824856633"
+API_BASE = "https://weak-deloris-nothing672434-fe85179d.koyeb.app/api"
 
-# CRITICAL FIX: Supergroup IDs MUST start with -100
-SOURCE_ID = -1003633481131
-DEST_ID = -1003824856633
+bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 
-# --- PERSISTENT APPROVAL SYSTEM ---
-DB_FILE = "users.json"
-def load_approved():
-    if os.path.exists(DB_FILE):
-        try:
-            with open(DB_FILE, "r") as f: return set(json.load(f))
-        except: return {ADMIN_ID}
-    return {ADMIN_ID}
+# --- STATE MANAGEMENT ---
+# In a production app, move APPROVED_USERS to a database (like SQLite or MongoDB)
+APPROVED_USERS = {ADMIN_ID} 
+USER_TRACKED_NUMBERS = {}  # {user_id: [number1, number2, ...]}
+SEEN_OTPS = set()          # Stores processed OTP IDs
 
-def save_approved():
-    with open(DB_FILE, "w") as f: json.dump(list(approved_users), f)
+# --- FLASK SERVER (For Render Hosting) ---
+app = Flask(__name__)
 
-approved_users = load_approved()
-pending_numbers = {}
+@app.route('/')
+def home():
+    return "OTP Bot is running."
 
-user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
-bot = TelegramClient('bot_session', API_ID, API_HASH)
+def run_flask():
+    # Render assigns a dynamic port via the PORT environment variable
+    import os
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
 
-# --- ADMIN NOTIFICATIONS ---
-async def send_to_admin(msg):
-    try: await bot.send_message(ADMIN_ID, msg)
-    except: pass
+# --- BOT COMMANDS ---
 
-# --- ACCESS CONTROL ---
-async def is_auth(event):
-    if event.sender_id in approved_users: return True
-    user = await event.get_sender()
-    details = f"👤 Name: {user.first_name}\n🆔 ID: `{user.id}`\n🔗 User: @{user.username or 'None'}"
-    await send_to_admin(f"🚫 **UNAUTHORIZED ATTEMPT**\n\n{details}")
-    await event.reply("❌ **Access Denied.** Your details have been sent to admin.")
-    return False
-
-# --- ADMIN COMMANDS ---
-@bot.on(events.NewMessage(pattern=r'/approve (\d+)', from_users=ADMIN_ID))
-async def approve(event):
-    uid = int(event.pattern_match.group(1))
-    approved_users.add(uid)
-    save_approved()
-    await event.reply(f"✅ User `{uid}` Approved.")
-
-@bot.on(events.NewMessage(pattern=r'/disapprove (\d+)', from_users=ADMIN_ID))
-async def disapprove(event):
-    uid = int(event.pattern_match.group(1))
-    if uid in approved_users:
-        approved_users.remove(uid)
-        save_approved()
-        await event.reply(f"❌ User `{uid}` Disapproved.")
-
-# --- BOT LOGIC ---
-@bot.on(events.NewMessage(pattern='/start'))
-async def start(event):
-    if not await is_auth(event): return
-    await event.reply("🇻🇪 **Venezuela Relay Pro**", buttons=[Button.inline("🚀 Request Service", b"get_ven")])
-
-@bot.on(events.CallbackQuery(data=b"get_ven"))
-async def callback(event):
-    if not await is_auth(event): return
-    try:
-        await event.edit("⏳ Fetching numbers...")
-        await user_client.send_message(TARGET_BOT, '/start')
-        await asyncio.sleep(3)
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    user_id = message.from_user.id
+    
+    # Check Approval
+    if user_id not in APPROVED_USERS:
+        bot.send_message(user_id, f"🚫 <b>Access Denied</b>\nYou are not approved to use this bot.\nYour ID: <code>{user_id}</code>")
         
-        msgs = await user_client.get_messages(TARGET_BOT, limit=1)
-        if msgs and msgs[0].reply_markup:
-            for r_idx, row in enumerate(msgs[0].reply_markup.rows):
-                for c_idx, btn in enumerate(row.buttons):
-                    if "Venezuela" in btn.text:
-                        await msgs[0].click(r_idx, c_idx)
-                        await asyncio.sleep(4)
-                        
-                        list_msgs = await user_client.get_messages(TARGET_BOT, limit=1)
-                        found = re.findall(r'(\d{10,15})', list_msgs[0].text)
-                        if found:
-                            for n in found: pending_numbers[n] = event.chat_id
-                            num_str = "\n".join([f"• `{n}`" for n in found])
-                            await event.edit(f"✅ **Numbers Fetched:**\n{num_str}", 
-                                           buttons=[Button.inline("🔄 Refresh List", b"get_ven"),
-                                                    Button.url("💬 OTP Group", "https://t.me/+6gHllUFSnBBmYzc1")])
-                        return
-    except Exception: await send_to_admin(traceback.format_exc())
+        # Notify Admin
+        admin_msg = f"⚠️ <b>New Access Request</b>\nUser ID: <code>{user_id}</code>\nUsername: @{message.from_user.username}\n\nTo approve, send:\n<code>/approve {user_id}</code>"
+        bot.send_message(ADMIN_ID, admin_msg)
+        return
 
-# --- THE FORWARDER (Listener for Source Group) ---
-@user_client.on(events.NewMessage)
-async def forwarder(event):
+    # Fetch Countries
     try:
-        # Verify message is from your specific Source ID
-        if event.chat_id != SOURCE_ID: return
-        
-        text = event.message.text or ""
-        # Match Masked format (58••9064) and the OTP code
-        masked_match = re.search(r'(\d{2})[•\*]+(\d{4})', text)
-        otp_match = re.search(r'(\d{4,10})', text)
-
-        if masked_match and otp_match:
-            f2, l4 = masked_match.group(1), masked_match.group(2)
-            otp_code = otp_match.group(1)
+        res = requests.get(f"{API_BASE}/numbers").json()
+        if res.get('success'):
+            # Extract unique countries
+            countries = {}
+            for n in res['numbers']:
+                if n['country'] not in countries:
+                    countries[n['country']] = n['flag']
             
-            bot_obj = await bot.get_me()
-            btns = [[Button.inline(f"{otp_code}", b"none")],
-                    [Button.url("🚀 Panel", f"https://t.me/{bot_obj.username}"),
-                     Button.url("📱 Channel", "https://t.me/+6gHllUFSnBBmYzc1")]]
+            # Build Keyboard
+            markup = InlineKeyboardMarkup()
+            markup.row_width = 2
+            buttons = [
+                InlineKeyboardButton(f"{flag} {country}", callback_data=f"ctry_{country}") 
+                for country, flag in countries.items()
+            ]
+            markup.add(*buttons)
+            
+            bot.send_message(user_id, "🌍 <b>Select a Country to track 10 numbers:</b>", reply_markup=markup)
+        else:
+            bot.send_message(user_id, "❌ Failed to fetch countries from API.")
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Error: {str(e)}")
 
-            for p_num, c_id in list(pending_numbers.items()):
-                if p_num.startswith(f2) and p_num.endswith(l4):
-                    caption = f"🇻🇪 VE | {f2}••{l4} | FB"
-                    # 1. Send to the User who requested it
-                    await bot.send_message(c_id, caption, buttons=btns)
-                    # 2. Send to your Destination Group
-                    try:
-                        await bot.send_message(DEST_ID, caption, buttons=btns)
-                    except Exception as e:
-                        await send_to_admin(f"Forwarding Error: {e}\nCheck if Bot is Admin in Destination!")
+@bot.message_handler(commands=['approve'])
+def approve_user(message):
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        user_to_approve = int(message.text.split()[1])
+        APPROVED_USERS.add(user_to_approve)
+        bot.send_message(ADMIN_ID, f"✅ User <code>{user_to_approve}</code> approved.")
+        bot.send_message(user_to_approve, "🎉 <b>You have been approved!</b>\nSend /start to begin.")
+    except (IndexError, ValueError):
+        bot.send_message(ADMIN_ID, "⚠️ Format: <code>/approve USER_ID</code>")
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ctry_'))
+def handle_country_selection(call):
+    user_id = call.from_user.id
+    country_name = call.data.split('ctry_')[1]
+    
+    bot.answer_callback_query(call.id, "Fetching numbers...")
+    
+    try:
+        res = requests.get(f"{API_BASE}/numbers").json()
+        if res.get('success'):
+            # Filter numbers by selected country and grab up to 10
+            country_numbers = [n['number'] for n in res['numbers'] if n['country'] == country_name][:10]
+            
+            if not country_numbers:
+                bot.edit_message_text("❌ No numbers available for this country.", chat_id=user_id, message_id=call.message.message_id)
+                return
+            
+            # Save to user's tracked list
+            USER_TRACKED_NUMBERS[user_id] = country_numbers
+            
+            msg = f"✅ <b>Now listening to {len(country_numbers)} numbers in {country_name}.</b>\n\nI will send you a DM when an OTP arrives for these numbers."
+            bot.edit_message_text(msg, chat_id=user_id, message_id=call.message.message_id)
+            
+    except Exception as e:
+        bot.send_message(user_id, f"❌ Error setting up listener: {str(e)}")
+
+
+# --- BACKGROUND OTP MONITOR ---
+
+def format_personal_msg(data):
+    flag = data.get('flag', '🌍')
+    country = data.get('country', 'Unknown')
+    masked = data.get('masked_number', '•••')
+    sender = data.get('sender', 'Unknown')
+    num = data.get('number', '')
+    otp = data.get('otp', 'No code')
+    msg = data.get('message', '').replace('<', '&lt;').replace('>', '&gt;')
+    
+    return f"""{flag} {country} | {masked} | {sender}
+
+Full Number: <code>{num}</code>
+
+Service: {sender}
+
+OTP : <code>{otp}</code>
+
+Message:
+<code>{msg}</code>"""
+
+def format_group_msg(data):
+    flag = data.get('flag', '🌍')
+    country = data.get('country', 'Unknown')
+    sender = data.get('sender', 'Unknown')
+    time_str = data.get('time', 'Just now')
+    masked = data.get('masked_number', '•••')
+    otp = data.get('otp', 'No code')
+    msg = data.get('message', '').replace('<', '&lt;').replace('>', '&gt;')
+    
+    return f"""{flag} New {country} {sender} OTP Received
+
+🕒 Time: {time_str}
+🌍 Country: {country} {flag}
+
+📲 Service: {sender}
+
+📞 Number: {masked}
+
+🔑 OTP: <code>{otp}</code>
+
+{msg}"""
+
+def monitor_otps():
+    while True:
+        try:
+            res = requests.get(f"{API_BASE}/otps?limit=100", timeout=10).json()
+            if res.get('success'):
+                # Process from oldest to newest so they appear in correct order
+                for data in reversed(res['otps']):
+                    otp_id = data.get('id')
                     
-                    del pending_numbers[p_num]
-                    break
-    except Exception: await send_to_admin(traceback.format_exc())
+                    if otp_id and otp_id not in SEEN_OTPS:
+                        SEEN_OTPS.add(otp_id)
+                        
+                        # Prevent memory leak by keeping SEEN_OTPS manageable
+                        if len(SEEN_OTPS) > 5000:
+                            SEEN_OTPS.clear()
+                        
+                        # 1. Send to Global Group
+                        try:
+                            group_msg = format_group_msg(data)
+                            bot.send_message(GROUP_ID, group_msg)
+                        except Exception as e:
+                            print(f"Group send error: {e}")
+                        
+                        # 2. Check if any user is tracking this specific number
+                        num = data.get('number')
+                        for user_id, tracked_nums in USER_TRACKED_NUMBERS.items():
+                            if num in tracked_nums:
+                                try:
+                                    personal_msg = format_personal_msg(data)
+                                    bot.send_message(user_id, personal_msg)
+                                except Exception as e:
+                                    print(f"Personal send error for {user_id}: {e}")
+                                    
+        except Exception as e:
+            print(f"API Monitor Error: {e}")
+            
+        time.sleep(5) # Poll every 5 seconds
 
-# --- RUN ---
-async def start_pro():
-    await user_client.start()
-    await bot.start(bot_token=BOT_TOKEN)
-    print("✅ All systems go. Listening to Source Group.")
-    await bot.run_until_disconnected()
-
-if __name__ == '__main__':
-    threading.Thread(target=run_server, daemon=True).start()
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_pro())
+# --- STARTUP SCRIPT ---
+if __name__ == "__main__":
+    # Start Flask Server in background
+    flask_thread = threading.Thread(target=run_flask)
+    flask_thread.daemon = True
+    flask_thread.start()
+    
+    # Start OTP Monitor in background
+    monitor_thread = threading.Thread(target=monitor_otps)
+    monitor_thread.daemon = True
+    monitor_thread.start()
+    
+    print("Bot is running...")
+    # Start Bot polling
+    bot.infinity_polling(timeout=10, long_polling_timeout=5)
