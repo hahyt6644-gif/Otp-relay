@@ -1,13 +1,13 @@
-from telethon import TelegramClient, events, Button, functions
+from telethon import TelegramClient, events, Button
 from telethon.sessions import StringSession
-from telethon.errors import MessageNotModifiedError, InviteHashExpiredError, UserAlreadyParticipantError
+from telethon.errors import MessageNotModifiedError
 from flask import Flask
-import threading, asyncio, os, re, traceback
+import threading, asyncio, os, re, traceback, json
 
-# --- FLASK WEB SERVER (Keep-Alive) ---
+# --- FLASK KEEP-ALIVE ---
 app = Flask(__name__)
 @app.route('/')
-def home(): return "🟢 SECURE OTP RELAY ONLINE"
+def home(): return "🟢 OTP RELAY PRO IS RUNNING"
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -21,71 +21,70 @@ STRING_SESSION = '1BVtsOLQBu1sWLUjy9O3WhRUoNkCwOcalVvxCOMrjYfFrUezu0qaZrlBK1CUHZ
 
 ADMIN_ID = 6357920694
 TARGET_BOT = "UxOtpBOT"
-
-# Correcting IDs for Telethon (adding -100 prefix for supergroups)
+# Telethon Supergroup IDs must start with -100
 SOURCE_ID = -1003633481131
 DEST_ID = -1003824856633
 
-# Approval System (Admin is approved by default)
-approved_users = {ADMIN_ID}
+# --- PERSISTENT APPROVAL SYSTEM ---
+DB_FILE = "users.json"
+
+def load_approved():
+    if os.path.exists(DB_FILE):
+        with open(DB_FILE, "r") as f:
+            return set(json.load(f))
+    return {ADMIN_ID}
+
+def save_approved():
+    with open(DB_FILE, "w") as f:
+        json.dump(list(approved_users), f)
+
+approved_users = load_approved()
 pending_numbers = {}
 
 user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 bot = TelegramClient('bot_session', API_ID, API_HASH)
 
-# --- ERROR HANDLER ---
-async def send_error(error_text):
-    try:
-        await bot.send_message(ADMIN_ID, f"⚠️ **RAW SYSTEM ERROR:**\n\n`{error_text}`")
-    except Exception as e:
-        print(f"Failed to send error to admin: {e}")
+# --- ADMIN NOTIFICATIONS ---
+async def send_to_admin(msg):
+    try: await bot.send_message(ADMIN_ID, msg)
+    except: pass
+
+# --- ACCESS CONTROL ---
+async def is_auth(event):
+    if event.sender_id in approved_users: return True
+    user = await event.get_sender()
+    details = f"👤 Name: {user.first_name}\n🆔 ID: `{user.id}`\n🔗 User: @{user.username or 'None'}"
+    await send_to_admin(f"🚫 **UNAUTHORIZED ATTEMPT**\n\n{details}")
+    await event.reply("❌ **Access Denied.** Your request has been sent to admin.")
+    return False
 
 # --- ADMIN COMMANDS ---
-
 @bot.on(events.NewMessage(pattern=r'/approve (\d+)', from_users=ADMIN_ID))
-async def approve_user(event):
+async def approve(event):
     uid = int(event.pattern_match.group(1))
     approved_users.add(uid)
-    await event.reply(f"✅ User `{uid}` has been approved.")
-    await bot.send_message(uid, "🎉 **Congratulations!** Your account has been approved by the admin. Use /start to begin.")
+    save_approved()
+    await event.reply(f"✅ User `{uid}` Approved.")
 
 @bot.on(events.NewMessage(pattern=r'/disapprove (\d+)', from_users=ADMIN_ID))
-async def disapprove_user(event):
+async def disapprove(event):
     uid = int(event.pattern_match.group(1))
     if uid in approved_users:
         approved_users.remove(uid)
-        await event.reply(f"❌ User `{uid}` has been removed from approved list.")
-    else:
-        await event.reply("User was not in the list.")
-
-# --- ACCESS CONTROL CHECK ---
-async def is_authorized(event):
-    if event.sender_id in approved_users:
-        return True
-    
-    # Notify Admin of unauthorized attempt
-    user = await event.get_sender()
-    details = f"Name: {user.first_name}\nID: `{user.id}`\nUsername: @{user.username or 'None'}"
-    await bot.send_message(ADMIN_ID, f"🚫 **UNAUTHORIZED ACCESS ATTEMPT**\n\n{details}")
-    
-    # Notify User
-    await event.reply("❌ **Access Denied.**\nYou are not authorized to use this bot. Your details have been sent to the admin for review.")
-    return False
+        save_approved()
+        await event.reply(f"❌ User `{uid}` Disapproved.")
 
 # --- BOT LOGIC ---
-
 @bot.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    if not await is_authorized(event): return
-    await event.reply("🇻🇪 **Secure OTP Relay**\nStatus: Authorized", 
-                     buttons=[Button.inline("🚀 Request Numbers", b"get_ven")])
+async def start(event):
+    if not await is_auth(event): return
+    await event.reply("🇻🇪 **Venezuela Relay Pro**", buttons=[Button.inline("🚀 Request Service", b"get_ven")])
 
 @bot.on(events.CallbackQuery(data=b"get_ven"))
-async def callback_handler(event):
-    if not await is_authorized(event): return
-    
+async def callback(event):
+    if not await is_auth(event): return
     try:
-        await event.edit("⏳ Fetching...")
+        await event.edit("⏳ Fetching numbers...")
         await user_client.send_message(TARGET_BOT, '/start')
         await asyncio.sleep(3)
         
@@ -98,57 +97,57 @@ async def callback_handler(event):
                         await asyncio.sleep(4)
                         
                         list_msgs = await user_client.get_messages(TARGET_BOT, limit=1)
-                        found_nums = re.findall(r'(\d{10,15})', list_msgs[0].text)
-                        
-                        if found_nums:
-                            for n in found_nums: pending_numbers[n] = event.chat_id
-                            num_str = "\n".join([f"• `{n}`" for n in found_nums])
-                            await event.edit(f"✅ **Active Numbers:**\n{num_str}", 
-                                           buttons=[Button.inline("🔄 Refresh List", b"get_ven")])
+                        # Extract all numbers
+                        found = re.findall(r'(\d{10,15})', list_msgs[0].text)
+                        if found:
+                            for n in found: pending_numbers[n] = event.chat_id
+                            num_str = "\n".join([f"• `{n}`" for n in found])
+                            await event.edit(f"✅ **Numbers Fetched:**\n{num_str}", 
+                                           buttons=[Button.inline("🔄 Refresh List", b"get_ven"),
+                                                    Button.url("💬 OTP Group", "https://t.me/+6gHllUFSnBBmYzc1")])
                         return
-    except Exception:
-        await send_error(traceback.format_exc())
+    except Exception: await send_to_admin(traceback.format_exc())
 
-# --- OTP LISTENER ---
-
+# --- THE FORWARDER (Digit Matching & Formatting) ---
 @user_client.on(events.NewMessage)
-async def otp_forwarder(event):
+async def forwarder(event):
     try:
         if event.chat_id != SOURCE_ID: return
-        
         text = event.message.text or ""
-        if "OTP" in text or "New" in text:
-            otp_match = re.search(r'(\d{4,8})', text)
-            num_match = re.search(r'Number:.*?([\d\*]+)', text)
-            
-            if otp_match and num_match:
-                otp = otp_match.group(1)
-                m_num = num_match.group(1)
-                f4, l4 = m_num.split('*')[0][:4], m_num.split('*')[-1][-4:]
-                
-                bot_user = (await bot.get_me()).username
-                buttons = [[Button.inline(f"{otp}", b"none")],
-                           [Button.url("🚀 Panel", f"https://t.me/{bot_user}")]]
+        
+        # Match Masked format: 58••9064 or 58***9064
+        masked_match = re.search(r'(\d{2})[•\*]+(\d{4})', text)
+        otp_match = re.search(r'(\d{4,8})', text)
 
-                for p_num, c_id in list(pending_numbers.items()):
-                    if p_num.startswith(f4) and p_num.endswith(l4):
-                        caption = f"🇻🇪 VE | {f4}••{l4} | FB"
-                        await bot.send_message(c_id, caption, buttons=buttons)
-                        await bot.send_message(DEST_ID, caption, buttons=buttons)
-                        del pending_numbers[p_num]
-                        break
-    except Exception:
-        await send_error(traceback.format_exc())
+        if masked_match and otp_match:
+            f2, l4 = masked_match.group(1), masked_match.group(2)
+            otp_code = otp_match.group(1)
+            
+            bot_user = (await bot.get_me()).username
+            btns = [[Button.inline(f"{otp_code}", b"none")],
+                    [Button.url("🚀 Panel", f"https://t.me/{bot_user}"),
+                     Button.url("📱 Channel", "https://t.me/+6gHllUFSnBBmYzc1")]]
+
+            for p_num, c_id in list(pending_numbers.items()):
+                if p_num.startswith(f2) and p_num.endswith(l4):
+                    caption = f"🇻🇪 VE | {f2}••{l4} | FB"
+                    # Send to User
+                    await bot.send_message(c_id, caption, buttons=btns)
+                    # Send to Destination Group
+                    await bot.send_message(DEST_ID, caption, buttons=btns)
+                    del pending_numbers[p_num]
+                    break
+    except Exception: await send_to_admin(traceback.format_exc())
 
 # --- RUN ---
-async def start_all():
+async def start_pro():
     await user_client.start()
     await bot.start(bot_token=BOT_TOKEN)
-    print("✅ Secure Bot Online.")
+    print("✅ All systems go.")
     await bot.run_until_disconnected()
 
 if __name__ == '__main__':
     threading.Thread(target=run_server, daemon=True).start()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    loop.run_until_complete(start_all())
+    loop.run_until_complete(start_pro())
