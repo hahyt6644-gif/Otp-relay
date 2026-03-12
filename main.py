@@ -22,8 +22,8 @@ except Exception:
 
 # --- STATE MANAGEMENT ---
 APPROVED_USERS = {ADMIN_ID} 
-USER_TRACKED_NUMBERS = {}  # {user_id: [active_number]}
-USER_SEEN_NUMBERS = {}     # {user_id: set(num1, num2...)} - Ensures uniqueness
+USER_TRACKED_NUMBERS = {}  # {user_id: [num1, num2, num3, num4, num5]}
+USER_SEEN_NUMBERS = {}     # {user_id: set(seen_numbers)} - Ensures uniqueness
 SEEN_OTPS = set()          
 OTP_GROUP_LINK = ""        
 
@@ -75,23 +75,26 @@ def approve_user(message):
 
 # --- UI HELPERS ---
 def get_countries_markup():
-    res = requests.get(f"{API_BASE}/numbers").json()
-    if not res.get('success'):
+    try:
+        res = requests.get(f"{API_BASE}/numbers").json()
+        if not res.get('success'):
+            return None
+        
+        countries = {}
+        for n in res['numbers']:
+            if n['country'] not in countries:
+                countries[n['country']] = n['flag']
+        
+        markup = InlineKeyboardMarkup(row_width=2)
+        buttons = [
+            # Slicing country name to 30 chars to avoid Telegram's 64-byte callback limit
+            InlineKeyboardButton(f"{flag} {country}", callback_data=f"ctry_{country[:30]}") 
+            for country, flag in countries.items()
+        ]
+        markup.add(*buttons)
+        return markup
+    except Exception:
         return None
-    
-    countries = {}
-    for n in res['numbers']:
-        if n['country'] not in countries:
-            countries[n['country']] = n['flag']
-    
-    markup = InlineKeyboardMarkup(row_width=2)
-    buttons = [
-        # Slicing country name to 30 chars to avoid Telegram's 64-byte callback limit
-        InlineKeyboardButton(f"{flag} {country}", callback_data=f"ctry_{country[:30]}") 
-        for country, flag in countries.items()
-    ]
-    markup.add(*buttons)
-    return markup
 
 # --- USER COMMANDS ---
 @bot.message_handler(commands=['start'])
@@ -104,43 +107,44 @@ def send_welcome(message):
         bot.send_message(ADMIN_ID, admin_msg)
         return
 
-    try:
-        markup = get_countries_markup()
-        if markup:
-            bot.send_message(user_id, "🌍 <b>Select a Country to get a number:</b>", reply_markup=markup)
-        else:
-            bot.send_message(user_id, "❌ Failed to fetch countries from API.")
-    except Exception as e:
-        bot.send_message(user_id, f"❌ Error: {str(e)}")
+    markup = get_countries_markup()
+    if markup:
+        bot.send_message(user_id, "🌍 <b>Select a Country to get numbers:</b>", reply_markup=markup)
+    else:
+        bot.send_message(user_id, "❌ Failed to fetch countries from API.")
 
 @bot.callback_query_handler(func=lambda call: call.data == 'back_countries')
 def back_to_countries(call):
     user_id = call.from_user.id
     markup = get_countries_markup()
     if markup:
-        bot.edit_message_text("🌍 <b>Select a Country to get a number:</b>", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
+        bot.edit_message_text("🌍 <b>Select a Country to get numbers:</b>", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('ctry_') or call.data.startswith('new_'))
 def handle_number_selection(call):
     user_id = call.from_user.id
     
-    # Extract country name safely from callback data
-    if call.data.startswith('ctry_'):
-        country_name = call.data.split('ctry_')[1]
-    else:
-        country_name = call.data.split('new_')[1]
+    # Safely extract the action and country name
+    action, country_name = call.data.split('_', 1)
         
-    bot.answer_callback_query(call.id, "Fetching a fresh unique number...")
+    bot.answer_callback_query(call.id, "Fetching fresh unique numbers...")
     
     try:
         res = requests.get(f"{API_BASE}/numbers").json()
         if res.get('success'):
-            # Initialize user's seen list if not exists
             if user_id not in USER_SEEN_NUMBERS:
                 USER_SEEN_NUMBERS[user_id] = set()
                 
-            # Get all numbers for this country (matching the sliced name if necessary)
-            all_matches = [n['number'] for n in res['numbers'] if n['country'].startswith(country_name)]
+            # Find all matching numbers and the correct flag
+            all_matches = []
+            flag = "🌍"
+            full_country_name = country_name
+            
+            for n in res['numbers']:
+                if n['country'].startswith(country_name):
+                    all_matches.append(n['number'])
+                    flag = n['flag']
+                    full_country_name = n['country']
             
             # Filter out numbers the user has already seen
             available_numbers = [n for n in all_matches if n not in USER_SEEN_NUMBERS[user_id]]
@@ -148,20 +152,24 @@ def handle_number_selection(call):
             if not available_numbers:
                 markup = InlineKeyboardMarkup()
                 markup.add(InlineKeyboardButton("🔙 Back to Countries", callback_data="back_countries"))
-                bot.edit_message_text(f"❌ <b>Out of Numbers!</b>\nYou have used all available unique numbers for this country.", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
+                bot.edit_message_text(f"❌ <b>Out of Numbers!</b>\nYou have used all available unique numbers for {full_country_name}.", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
                 return
             
-            # Pick a Random Unique Number
-            picked_number = random.choice(available_numbers)
+            # Pick up to 5 Random Unique Numbers
+            amount_to_pick = min(len(available_numbers), 5)
+            picked_numbers = random.sample(available_numbers, amount_to_pick)
             
             # Update memory
-            USER_SEEN_NUMBERS[user_id].add(picked_number)
-            USER_TRACKED_NUMBERS[user_id] = [picked_number] # Only track this active number
+            USER_SEEN_NUMBERS[user_id].update(picked_numbers)
+            USER_TRACKED_NUMBERS[user_id] = picked_numbers # Track all 5
             
-            msg = f"✅ <b>Your Virtual Number:</b>\n\n<code>{picked_number}</code>\n\n<i>⏳ Waiting for SMS... I will DM you instantly when an OTP arrives.</i>"
+            # Build the list string
+            num_list_str = "\n".join([f"• <code>{n}</code>" for n in picked_numbers])
+            
+            msg = f"{flag} <b>Country: {full_country_name}</b>\n\n✅ <b>Listening to {len(picked_numbers)} Virtual Numbers:</b>\n\n{num_list_str}\n\n<i>⏳ Waiting for SMS... I will DM you instantly when an OTP arrives.</i>"
             
             markup = InlineKeyboardMarkup()
-            markup.add(InlineKeyboardButton("🔄 Get New Number", callback_data=f"new_{country_name}"))
+            markup.add(InlineKeyboardButton("🔄 Get New Numbers", callback_data=f"new_{country_name}"))
             markup.add(InlineKeyboardButton("🔙 Change Country", callback_data="back_countries"))
             
             bot.edit_message_text(msg, chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
@@ -199,7 +207,7 @@ def monitor_otps():
                             if OTP_GROUP_LINK:
                                 markup.add(InlineKeyboardButton("💬 Join OTP Group", url=OTP_GROUP_LINK))
                             bot.send_message(GROUP_ID, group_msg, reply_markup=markup)
-                        except Exception as e:
+                        except Exception:
                             pass
                         
                         # PERSONAL CHAT
@@ -208,7 +216,7 @@ def monitor_otps():
                             if num in tracked_nums:
                                 try:
                                     bot.send_message(user_id, format_personal_msg(data))
-                                except Exception as e:
+                                except Exception:
                                     pass
         except Exception:
             pass
