@@ -3,6 +3,7 @@ from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import threading
 import time
+import random
 from flask import Flask
 import os
 
@@ -14,7 +15,6 @@ API_BASE = "https://weak-deloris-nothing672434-fe85179d.koyeb.app/api"
 
 bot = telebot.TeleBot(TOKEN, parse_mode='HTML')
 
-# Fetch bot username dynamically for the group buttons
 try:
     BOT_USERNAME = bot.get_me().username
 except Exception:
@@ -22,11 +22,12 @@ except Exception:
 
 # --- STATE MANAGEMENT ---
 APPROVED_USERS = {ADMIN_ID} 
-USER_TRACKED_NUMBERS = {}  # {user_id: [number1, number2, ...]}
-SEEN_OTPS = set()          # Stores processed OTP IDs
-OTP_GROUP_LINK = ""        # Set via /setotp
+USER_TRACKED_NUMBERS = {}  # {user_id: [active_number]}
+USER_SEEN_NUMBERS = {}     # {user_id: set(num1, num2...)} - Ensures uniqueness
+SEEN_OTPS = set()          
+OTP_GROUP_LINK = ""        
 
-# --- FLASK SERVER (For Render Hosting) ---
+# --- FLASK SERVER ---
 app = Flask(__name__)
 
 @app.route('/')
@@ -38,7 +39,6 @@ def run_flask():
     app.run(host='0.0.0.0', port=port)
 
 # --- ADMIN COMMANDS ---
-
 @bot.message_handler(commands=['adhelp'])
 def admin_help(message):
     if message.from_user.id != ADMIN_ID:
@@ -56,7 +56,6 @@ def set_otp_link(message):
         return
     global OTP_GROUP_LINK
     try:
-        # Extracts the link after the command
         OTP_GROUP_LINK = message.text.split(" ", 1)[1].strip()
         bot.reply_to(message, f"✅ <b>OTP Group link updated to:</b>\n{OTP_GROUP_LINK}")
     except IndexError:
@@ -74,121 +73,116 @@ def approve_user(message):
     except (IndexError, ValueError):
         bot.send_message(ADMIN_ID, "⚠️ <b>Format:</b> <code>/approve USER_ID</code>")
 
-# --- USER COMMANDS ---
+# --- UI HELPERS ---
+def get_countries_markup():
+    res = requests.get(f"{API_BASE}/numbers").json()
+    if not res.get('success'):
+        return None
+    
+    countries = {}
+    for n in res['numbers']:
+        if n['country'] not in countries:
+            countries[n['country']] = n['flag']
+    
+    markup = InlineKeyboardMarkup(row_width=2)
+    buttons = [
+        # Slicing country name to 30 chars to avoid Telegram's 64-byte callback limit
+        InlineKeyboardButton(f"{flag} {country}", callback_data=f"ctry_{country[:30]}") 
+        for country, flag in countries.items()
+    ]
+    markup.add(*buttons)
+    return markup
 
+# --- USER COMMANDS ---
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
     user_id = message.from_user.id
     
-    # Check Approval
     if user_id not in APPROVED_USERS:
         bot.send_message(user_id, f"🚫 <b>Access Denied</b>\nYou are not approved to use this bot.\nYour ID: <code>{user_id}</code>")
-        # Notify Admin
         admin_msg = f"⚠️ <b>New Access Request</b>\nUser ID: <code>{user_id}</code>\nUsername: @{message.from_user.username}\n\nTo approve, send:\n<code>/approve {user_id}</code>"
         bot.send_message(ADMIN_ID, admin_msg)
         return
 
-    # Fetch Countries
     try:
-        res = requests.get(f"{API_BASE}/numbers").json()
-        if res.get('success'):
-            countries = {}
-            for n in res['numbers']:
-                if n['country'] not in countries:
-                    countries[n['country']] = n['flag']
-            
-            markup = InlineKeyboardMarkup()
-            markup.row_width = 2
-            buttons = [
-                InlineKeyboardButton(f"{flag} {country}", callback_data=f"ctry_{country}") 
-                for country, flag in countries.items()
-            ]
-            markup.add(*buttons)
-            
-            bot.send_message(user_id, "🌍 <b>Select a Country to generate 10 numbers:</b>", reply_markup=markup)
+        markup = get_countries_markup()
+        if markup:
+            bot.send_message(user_id, "🌍 <b>Select a Country to get a number:</b>", reply_markup=markup)
         else:
             bot.send_message(user_id, "❌ Failed to fetch countries from API.")
     except Exception as e:
         bot.send_message(user_id, f"❌ Error: {str(e)}")
 
-@bot.callback_query_handler(func=lambda call: call.data.startswith('ctry_'))
-def handle_country_selection(call):
+@bot.callback_query_handler(func=lambda call: call.data == 'back_countries')
+def back_to_countries(call):
     user_id = call.from_user.id
-    country_name = call.data.split('ctry_')[1]
+    markup = get_countries_markup()
+    if markup:
+        bot.edit_message_text("🌍 <b>Select a Country to get a number:</b>", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('ctry_') or call.data.startswith('new_'))
+def handle_number_selection(call):
+    user_id = call.from_user.id
     
-    bot.answer_callback_query(call.id, "Fetching numbers...")
+    # Extract country name safely from callback data
+    if call.data.startswith('ctry_'):
+        country_name = call.data.split('ctry_')[1]
+    else:
+        country_name = call.data.split('new_')[1]
+        
+    bot.answer_callback_query(call.id, "Fetching a fresh unique number...")
     
     try:
         res = requests.get(f"{API_BASE}/numbers").json()
         if res.get('success'):
-            # Grab up to 10 numbers for this country
-            country_numbers = [n['number'] for n in res['numbers'] if n['country'] == country_name][:10]
+            # Initialize user's seen list if not exists
+            if user_id not in USER_SEEN_NUMBERS:
+                USER_SEEN_NUMBERS[user_id] = set()
+                
+            # Get all numbers for this country (matching the sliced name if necessary)
+            all_matches = [n['number'] for n in res['numbers'] if n['country'].startswith(country_name)]
             
-            if not country_numbers:
-                bot.edit_message_text("❌ No numbers available for this country.", chat_id=user_id, message_id=call.message.message_id)
+            # Filter out numbers the user has already seen
+            available_numbers = [n for n in all_matches if n not in USER_SEEN_NUMBERS[user_id]]
+            
+            if not available_numbers:
+                markup = InlineKeyboardMarkup()
+                markup.add(InlineKeyboardButton("🔙 Back to Countries", callback_data="back_countries"))
+                bot.edit_message_text(f"❌ <b>Out of Numbers!</b>\nYou have used all available unique numbers for this country.", chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
                 return
             
-            # Save to user's tracked list
-            USER_TRACKED_NUMBERS[user_id] = country_numbers
+            # Pick a Random Unique Number
+            picked_number = random.choice(available_numbers)
             
-            # Formats the list of numbers so the user actually sees them
-            num_list_str = "\n".join([f"• <code>{n}</code>" for n in country_numbers])
+            # Update memory
+            USER_SEEN_NUMBERS[user_id].add(picked_number)
+            USER_TRACKED_NUMBERS[user_id] = [picked_number] # Only track this active number
             
-            msg = f"✅ <b>Now listening to {len(country_numbers)} numbers in {country_name}</b>:\n\n{num_list_str}\n\n<i>I will send you a DM instantly when an OTP arrives for any of these numbers.</i>"
+            msg = f"✅ <b>Your Virtual Number:</b>\n\n<code>{picked_number}</code>\n\n<i>⏳ Waiting for SMS... I will DM you instantly when an OTP arrives.</i>"
             
-            bot.edit_message_text(msg, chat_id=user_id, message_id=call.message.message_id)
+            markup = InlineKeyboardMarkup()
+            markup.add(InlineKeyboardButton("🔄 Get New Number", callback_data=f"new_{country_name}"))
+            markup.add(InlineKeyboardButton("🔙 Change Country", callback_data="back_countries"))
+            
+            bot.edit_message_text(msg, chat_id=user_id, message_id=call.message.message_id, reply_markup=markup)
             
     except Exception as e:
-        bot.send_message(user_id, f"❌ Error setting up listener: {str(e)}")
-
+        bot.send_message(user_id, f"❌ Error: {str(e)}")
 
 # --- BACKGROUND OTP MONITOR ---
-
 def format_personal_msg(data):
-    flag = data.get('flag', '🌍')
-    country = data.get('country', 'Unknown')
-    masked = data.get('masked_number', '•••')
-    sender = data.get('sender', 'Unknown')
-    num = data.get('number', '')
-    otp = data.get('otp', 'No code')
-    msg = data.get('message', '').replace('<', '&lt;').replace('>', '&gt;')
-    
-    return f"""{flag} {country} | {masked} | {sender}
-
-Full Number: <code>{num}</code>
-
-Service: {sender}
-
-OTP : <code>{otp}</code>
-
-Message:
-<code>{msg}</code>"""
+    flag, country, masked, sender, num, otp, msg = data.get('flag','🌍'), data.get('country','Unknown'), data.get('masked_number','•••'), data.get('sender','Unknown'), data.get('number',''), data.get('otp','No code'), data.get('message','').replace('<','&lt;').replace('>','&gt;')
+    return f"""{flag} {country} | {masked} | {sender}\n\nFull Number: <code>{num}</code>\n\nService: {sender}\n\nOTP : <code>{otp}</code>\n\nMessage:\n<code>{msg}</code>"""
 
 def format_group_msg(data):
-    flag = data.get('flag', '🌍')
-    country = data.get('country', 'Unknown')
-    sender = data.get('sender', 'Unknown')
-    time_str = data.get('time', 'Just now')
-    masked = data.get('masked_number', '•••')
-    otp = data.get('otp', 'No code')
-    msg = data.get('message', '').replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Uses Telegram's <blockquote> tags to match your screenshot exactly
-    return f"""{flag} <b>New {country} {sender} OTP Received</b>
-
-<blockquote>🕒 Time: {time_str}</blockquote>
-<blockquote>🌍 Country: {country} {flag}</blockquote>
-<blockquote>📲 Service: {sender}</blockquote>
-<blockquote>📞 Number: {masked}</blockquote>
-<blockquote>🔑 OTP: <code>{otp}</code></blockquote>
-<blockquote>{msg}</blockquote>"""
+    flag, country, sender, time_str, masked, otp, msg = data.get('flag','🌍'), data.get('country','Unknown'), data.get('sender','Unknown'), data.get('time','Just now'), data.get('masked_number','•••'), data.get('otp','No code'), data.get('message','').replace('<','&lt;').replace('>','&gt;')
+    return f"""{flag} <b>New {country} {sender} OTP Received</b>\n\n<blockquote>🕒 Time: {time_str}</blockquote>\n<blockquote>🌍 Country: {country} {flag}</blockquote>\n<blockquote>📲 Service: {sender}</blockquote>\n<blockquote>📞 Number: {masked}</blockquote>\n<blockquote>🔑 OTP: <code>{otp}</code></blockquote>\n<blockquote>{msg}</blockquote>"""
 
 def monitor_otps():
     while True:
         try:
             res = requests.get(f"{API_BASE}/otps?limit=100", timeout=10).json()
             if res.get('success'):
-                # Process oldest to newest
                 for data in reversed(res['otps']):
                     otp_id = data.get('id')
                     
@@ -197,46 +191,31 @@ def monitor_otps():
                         if len(SEEN_OTPS) > 5000:
                             SEEN_OTPS.clear()
                         
-                        # 1. SEND TO GLOBAL GROUP WITH BUTTONS
+                        # GLOBAL GROUP
                         try:
                             group_msg = format_group_msg(data)
                             markup = InlineKeyboardMarkup()
-                            
-                            # Add the Bot button
                             markup.add(InlineKeyboardButton("📲 Get Numbers From Bot", url=f"https://t.me/{BOT_USERNAME}?start=true"))
-                            
-                            # Add the Group button ONLY if the admin has set it
                             if OTP_GROUP_LINK:
                                 markup.add(InlineKeyboardButton("💬 Join OTP Group", url=OTP_GROUP_LINK))
-                                
                             bot.send_message(GROUP_ID, group_msg, reply_markup=markup)
                         except Exception as e:
-                            print(f"Group send error: {e}")
+                            pass
                         
-                        # 2. SEND TO PERSONAL CHAT IF TRACKING
+                        # PERSONAL CHAT
                         num = data.get('number')
                         for user_id, tracked_nums in USER_TRACKED_NUMBERS.items():
                             if num in tracked_nums:
                                 try:
-                                    personal_msg = format_personal_msg(data)
-                                    bot.send_message(user_id, personal_msg)
+                                    bot.send_message(user_id, format_personal_msg(data))
                                 except Exception as e:
-                                    print(f"Personal send error for {user_id}: {e}")
-                                    
-        except Exception as e:
-            print(f"API Monitor Error: {e}")
-            
+                                    pass
+        except Exception:
+            pass
         time.sleep(5) 
 
-# --- STARTUP ---
 if __name__ == "__main__":
-    flask_thread = threading.Thread(target=run_flask)
-    flask_thread.daemon = True
-    flask_thread.start()
-    
-    monitor_thread = threading.Thread(target=monitor_otps)
-    monitor_thread.daemon = True
-    monitor_thread.start()
-    
+    threading.Thread(target=run_flask, daemon=True).start()
+    threading.Thread(target=monitor_otps, daemon=True).start()
     print("Bot is running...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
