@@ -2,12 +2,12 @@ from telethon import TelegramClient, events, Button, functions
 from telethon.sessions import StringSession
 from telethon.errors import MessageNotModifiedError, InviteHashExpiredError, UserAlreadyParticipantError
 from flask import Flask
-import threading, asyncio, os, re, requests, traceback
+import threading, asyncio, os, re, traceback
 
-# --- FLASK WEB SERVER ---
-app = Flask(name)
+# --- FLASK WEB SERVER (Keep-Alive) ---
+app = Flask(__name__)
 @app.route('/')
-def home(): return "🟢 SYSTEM ONLINE: AI-HEALING ACTIVE"
+def home(): return "🟢 SECURE OTP RELAY ONLINE"
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
@@ -18,101 +18,105 @@ API_ID = 25240346
 API_HASH = 'b8849fd945ed9225a002fda96591b6ee'
 BOT_TOKEN = '7610030035:AAEJf2HX7lSg9H9QyS1Y1a8o_586qhvGmkg'
 STRING_SESSION = '1BVtsOLQBu1sWLUjy9O3WhRUoNkCwOcalVvxCOMrjYfFrUezu0qaZrlBK1CUHZE0cm4dnq4V58LhDxyat4qcpkQmCgyD65gCKoxGGc-ZVpMgPLLfg1BD235emPa_y3g3eyoBmCDXd9q01rKcQaacp174qxlomjy_rXM4xBiblwCWNhoztyIGBFERNDnkiKz3EztZAHd64nb4kK4NSN49BDl1hgxMfqaeIs2lIkRCUMHLyrYzrAZ4DY6biOsNakeaoHGrQJEecnn9V4xQEtm9zvfddkuVn6IiLMTDGjA4mBYbdjB6AaU-FubFhKRqjVhwU0mk5Aih2cqPrQ8nUHwMvrYp6HekIo8s='
-ADMIN_ID = 6357920694
 
-config = {
-    "TARGET_BOT": "UxOtpBOT",
-    "SOURCE_ID": -1003633481131, # Replace with your Source Group ID (Integer)
-    "DEST_ID": -1003824856633,   # Replace with your Dest Group ID (Integer)
-    "SOURCE_LINK": "https://t.me/+ZxBeMVFToXEzNDFh",     
-    "DEST_LINK": "https://t.me/+6gHllUFSnBBmYzc1",       
-    "CHANNEL_LINK": "https://t.me/YourChannel" 
-}
+ADMIN_ID = 6357920694
+TARGET_BOT = "UxOtpBOT"
+
+# Correcting IDs for Telethon (adding -100 prefix for supergroups)
+SOURCE_ID = -1003633481131
+DEST_ID = -1003824856633
+
+# Approval System (Admin is approved by default)
+approved_users = {ADMIN_ID}
+pending_numbers = {}
 
 user_client = TelegramClient(StringSession(STRING_SESSION), API_ID, API_HASH)
 bot = TelegramClient('bot_session', API_ID, API_HASH)
-pending_numbers = {}
 
-# --- HIGH-INTEL AI ERROR HANDLER ---
-async def ai_self_fix(error_trace):
+# --- ERROR HANDLER ---
+async def send_error(error_text):
     try:
-        # We read our own code to send it to the AI for a better fix
-        with open(file, 'r') as f:
-            code_snippet = f.read()[-1000:] # Last 1000 chars of code
-            
-        prompt = f"Fix this Python Telethon Error: {error_trace}. Here is the relevant code: {code_snippet}"
-        ai_url = f"https://apis.prexzyvilla.site/ai/ai4chat?prompt={prompt}"
-        
-        res = requests.get(ai_url).json()
-        advice = res["data"]["response"] if res.get("status") else "AI could not generate a fix."
-        
-        await bot.send_message(ADMIN_ID, f"⚠️ CRITICAL ERROR DETECTED\n\nError:\n{error_trace[:500]}\n\n🤖 AI FIX SUGGESTION:\n{advice}")
+        await bot.send_message(ADMIN_ID, f"⚠️ **RAW SYSTEM ERROR:**\n\n`{error_text}`")
     except Exception as e:
-        print(f"Failed to notify admin: {e}")
+        print(f"Failed to send error to admin: {e}")
 
-# --- AUTO-JOINER ---
-async def auto_join():
-    for link in [config["SOURCE_LINK"], config["DEST_LINK"]]:
-        if link and "t.me/+" in link:
-            try:
-                hash_part = link.split('+')[-1]
-                await user_client(functions.messages.ImportChatInviteRequest(hash=hash_part))
-            except (UserAlreadyParticipantError, InviteHashExpiredError): continue
-            except Exception as e: await ai_self_fix(f"Join Error: {e}")
+# --- ADMIN COMMANDS ---
+
+@bot.on(events.NewMessage(pattern=r'/approve (\d+)', from_users=ADMIN_ID))
+async def approve_user(event):
+    uid = int(event.pattern_match.group(1))
+    approved_users.add(uid)
+    await event.reply(f"✅ User `{uid}` has been approved.")
+    await bot.send_message(uid, "🎉 **Congratulations!** Your account has been approved by the admin. Use /start to begin.")
+
+@bot.on(events.NewMessage(pattern=r'/disapprove (\d+)', from_users=ADMIN_ID))
+async def disapprove_user(event):
+    uid = int(event.pattern_match.group(1))
+    if uid in approved_users:
+        approved_users.remove(uid)
+        await event.reply(f"❌ User `{uid}` has been removed from approved list.")
+    else:
+        await event.reply("User was not in the list.")
+
+# --- ACCESS CONTROL CHECK ---
+async def is_authorized(event):
+    if event.sender_id in approved_users:
+        return True
+    
+    # Notify Admin of unauthorized attempt
+    user = await event.get_sender()
+    details = f"Name: {user.first_name}\nID: `{user.id}`\nUsername: @{user.username or 'None'}"
+    await bot.send_message(ADMIN_ID, f"🚫 **UNAUTHORIZED ACCESS ATTEMPT**\n\n{details}")
+    
+    # Notify User
+    await event.reply("❌ **Access Denied.**\nYou are not authorized to use this bot. Your details have been sent to the admin for review.")
+    return False
 
 # --- BOT LOGIC ---
 
 @bot.on(events.NewMessage(pattern='/start'))
 async def start_handler(event):
-    await auto_join()
-    await event.reply("🇻🇪 Venezuela OTP Relay\nMode: Active", 
+    if not await is_authorized(event): return
+    await event.reply("🇻🇪 **Secure OTP Relay**\nStatus: Authorized", 
                      buttons=[Button.inline("🚀 Request Numbers", b"get_ven")])
 
 @bot.on(events.CallbackQuery(data=b"get_ven"))
 async def callback_handler(event):
-    try:
-        await event.edit("⏳ Contacting Provider Bot...")
-    except MessageNotModifiedError: pass
+    if not await is_authorized(event): return
     
     try:
-        await user_client.send_message(config['TARGET_BOT'], '/start')
+        await event.edit("⏳ Fetching...")
+        await user_client.send_message(TARGET_BOT, '/start')
         await asyncio.sleep(3)
         
-        # Click Venezuela and extract numbers
-        msgs = await user_client.get_messages(config['TARGET_BOT'], limit=1)
+        msgs = await user_client.get_messages(TARGET_BOT, limit=1)
         if msgs and msgs[0].reply_markup:
             for r_idx, row in enumerate(msgs[0].reply_markup.rows):
                 for c_idx, btn in enumerate(row.buttons):
                     if "Venezuela" in btn.text:
                         await msgs[0].click(r_idx, c_idx)
-                        await asyncio.sleep(5)
+                        await asyncio.sleep(4)
                         
-                        list_msgs = await user_client.get_messages(config['TARGET_BOT'], limit=1)
-                        # Bulletproof Digit Extraction
+                        list_msgs = await user_client.get_messages(TARGET_BOT, limit=1)
                         found_nums = re.findall(r'(\d{10,15})', list_msgs[0].text)
                         
                         if found_nums:
                             for n in found_nums: pending_numbers[n] = event.chat_id
-                            num_str = "\n".join([f"• {n}" for n in found_nums])
-                            
-                            btns = [
-                                [Button.inline("🔄 Refresh List", b"get_ven")],
-                                [Button.url("💬 Join OTP Group", config["SOURCE_LINK"])]
-                            ]
-                            await event.edit(f"✅ Numbers Active:\n{num_str}", buttons=btns)
+                            num_str = "\n".join([f"• `{n}`" for n in found_nums])
+                            await event.edit(f"✅ **Active Numbers:**\n{num_str}", 
+                                           buttons=[Button.inline("🔄 Refresh List", b"get_ven")])
                         return
     except Exception:
-        await ai_self_fix(traceback.format_exc())
+        await send_error(traceback.format_exc())
 
-# --- THE FORWARDER (mimics your screenshot) ---
+# --- OTP LISTENER ---
 
 @user_client.on(events.NewMessage)
 async def otp_forwarder(event):
     try:
+        if event.chat_id != SOURCE_ID: return
+        
         text = event.message.text or ""
-        # Check if the message is from your Source ID
-        if config["SOURCE_ID"] and event.chat_id != int(config["SOURCE_ID"]): return
-
         if "OTP" in text or "New" in text:
             otp_match = re.search(r'(\d{4,8})', text)
             num_match = re.search(r'Number:.*?([\d\*]+)', text)
@@ -122,40 +126,28 @@ async def otp_forwarder(event):
                 m_num = num_match.group(1)
                 f4, l4 = m_num.split('*')[0][:4], m_num.split('*')[-1][-4:]
                 
-                # Fetch bot username dynamically
                 bot_user = (await bot.get_me()).username
-                
-                buttons = [
-                    [Button.inline(f"{otp}", b"none")],
-                    [Button.url("🚀 Panel", f"https://t.me/{bot_user}")],
-                    [Button.url("📱 Channel", config["CHANNEL_LINK"])]
-                ]
+                buttons = [[Button.inline(f"{otp}", b"none")],
+                           [Button.url("🚀 Panel", f"https://t.me/{bot_user}")]]
 
-                caption = f"🇻🇪 VE | {f4}••{l4} | FB"
-
-                # Match against pending numbers
                 for p_num, c_id in list(pending_numbers.items()):
                     if p_num.startswith(f4) and p_num.endswith(l4):
-                        # 1. Send to User
+                        caption = f"🇻🇪 VE | {f4}••{l4} | FB"
                         await bot.send_message(c_id, caption, buttons=buttons)
-                        # 2. Forward to your Dest Group
-                        if config["DEST_ID"]:
-                            await bot.send_message(config["DEST_ID"], caption, buttons=buttons)
-                        
+                        await bot.send_message(DEST_ID, caption, buttons=buttons)
                         del pending_numbers[p_num]
                         break
     except Exception:
-        await ai_self_fix(traceback.format_exc())
+        await send_error(traceback.format_exc())
 
-# --- STARTUP ---
+# --- RUN ---
 async def start_all():
     await user_client.start()
     await bot.start(bot_token=BOT_TOKEN)
-    await auto_join()
-    print("✅ System Ready.")
+    print("✅ Secure Bot Online.")
     await bot.run_until_disconnected()
 
-if name == 'main':
+if __name__ == '__main__':
     threading.Thread(target=run_server, daemon=True).start()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
